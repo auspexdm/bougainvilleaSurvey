@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Bougainvillea &mdash; Guest Feedback</title>
+<title>Bougainvillea &mdash; Guest Feedback &amp; Quality Control</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;1,6..72,300&family=Inter+Tight:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -404,148 +404,119 @@ const ROOMS = ['101','102','103','104','105','106','107','108','109','110',
 const DEPTS = ['Reception','Room / Housekeeping','Restaurant','Recreation'];
 
 /* =========================================================================
-   2. CONFIG + DATA LAYER
-   Fill in the two values below from your Supabase project
-   (Project Settings -> API).  The anon key is safe to ship in the browser;
-   the database policies in schema.sql are what actually protect the data.
+   2. DATA LAYER
+   Everything the app reads or writes goes through DB. Sample data lives in
+   memory: submitting works and updates the dashboard live, but a page
+   refresh resets it. Swapping these methods for a real database is the
+   only change the production build needs.
    ========================================================================= */
-
-const CONFIG = {
-  supabaseUrl:     'PASTE_YOUR_SUPABASE_URL',      // e.g. https://abcdefgh.supabase.co
-  supabaseAnonKey: 'PASTE_YOUR_SUPABASE_ANON_KEY'
-};
-const CONFIGURED = !CONFIG.supabaseUrl.startsWith('PASTE_');
-
-/* thin REST wrapper — no SDK, no build step */
-const SB = {
-  token:null,
-  _store(t){ this.token=t; try{ t ? sessionStorage.setItem('bv_tok',t) : sessionStorage.removeItem('bv_tok'); }catch(e){} },
-  restore(){ try{ this.token = sessionStorage.getItem('bv_tok'); }catch(e){ this.token=null; } return this.token; },
-  headers(){
-    return {'apikey':CONFIG.supabaseAnonKey,
-            'Authorization':'Bearer '+(this.token||CONFIG.supabaseAnonKey),
-            'Content-Type':'application/json'};
-  },
-  async req(path, opts={}){
-    const r = await fetch(CONFIG.supabaseUrl+path, Object.assign({headers:this.headers()}, opts));
-    const text = await r.text();
-    if(!r.ok) throw new Error(text || ('HTTP '+r.status));
-    return text ? JSON.parse(text) : null;
-  },
-  get(q){ return this.req('/rest/v1/'+q); },
-  post(q, body){ return this.req('/rest/v1/'+q, {method:'POST', headers:Object.assign(this.headers(),{Prefer:'return=representation'}), body:JSON.stringify(body)}); },
-  /* used by the guest survey: anon can insert but not read back, so ask for nothing in return */
-  postQuiet(q, body){ return this.req('/rest/v1/'+q, {method:'POST', headers:Object.assign(this.headers(),{Prefer:'return=minimal'}), body:JSON.stringify(body)}); },
-  patch(q, body){ return this.req('/rest/v1/'+q, {method:'PATCH', headers:Object.assign(this.headers(),{Prefer:'return=representation'}), body:JSON.stringify(body)}); },
-  async signIn(email, password){
-    const r = await fetch(CONFIG.supabaseUrl+'/auth/v1/token?grant_type=password', {
-      method:'POST', headers:{'apikey':CONFIG.supabaseAnonKey,'Content-Type':'application/json'},
-      body:JSON.stringify({email, password})
-    });
-    const d = await r.json();
-    if(!r.ok) throw new Error(d.error_description || d.msg || 'Sign-in failed');
-    this._store(d.access_token);
-    return d;
-  },
-  signOut(){ this._store(null); }
-};
-
-/* row <-> app object mapping */
-const mapSurvey = r => ({
-  id:r.id, room:r.room, at:r.at, recommendation:r.recommendation, comments:r.comments||'',
-  avg:r.avg, hasLow:r.has_low, ratings:{}
-});
-const mapIssue = r => ({
-  id:r.id, surveyId:r.survey_id, room:r.room, department:r.department, category:r.category,
-  tags:r.tags||[], otherText:r.other_text||'', rating:r.rating, at:r.at,
-  status:r.status, assignedTo:r.assigned_to||'', notes:r.notes||'', resolvedAt:r.resolved_at
-});
-const mapSettings = r => ({
-  resortName:r.resort_name, logo:r.logo_url||'', googleReviewUrl:r.google_review_url||'',
-  brandColour:r.brand_colour, surveyLength:r.survey_length, lowThreshold:r.low_threshold,
-  resolutionTargetHrs:r.resolution_target_hrs, reportTime:r.report_time, baseUrl:r.base_url||''
-});
 
 const DB = {
   settings:{
     resortName:'Bougainvillea',
     logo:'',
-    googleReviewUrl:'',
+    googleReviewUrl:'https://g.page/r/example/review',
     brandColour:'#70235E',
     surveyLength:'short',
     lowThreshold:3,
     resolutionTargetHrs:2,
     reportTime:'21:00',
-    baseUrl:location.origin
+    baseUrl:location.origin + location.pathname,
+    adminPassword:'auspex'
   },
-  surveys:[], issues:[], loaded:false,
+  surveys:[],
+  issues:[],
+  _sid:1, _iid:1,
 
-  async loadSettings(){
-    if(!CONFIGURED) return;
-    const rows = await SB.get('settings?id=eq.1&select=*');
-    if(rows && rows[0]) Object.assign(this.settings, mapSettings(rows[0]));
-    if(!this.settings.baseUrl) this.settings.baseUrl = location.origin;
+  addSurvey(rec){
+    const s = Object.assign({id:'S'+String(this._sid++).padStart(4,'0')}, rec);
+    this.surveys.push(s);
+    return s;
   },
-  async saveSettings(){
-    const s = this.settings;
-    await SB.patch('settings?id=eq.1', {
-      resort_name:s.resortName, logo_url:s.logo, google_review_url:s.googleReviewUrl,
-      brand_colour:s.brandColour, survey_length:s.surveyLength, low_threshold:s.lowThreshold,
-      resolution_target_hrs:s.resolutionTargetHrs, report_time:s.reportTime, base_url:s.baseUrl
-    });
+  addIssue(rec){
+    const i = Object.assign({id:'Q'+String(this._iid++).padStart(4,'0'), status:'Open', assignedTo:'', notes:'', resolvedAt:null}, rec);
+    this.issues.push(i);
+    return i;
   },
-  async loadAll(force){
-    if(this.loaded && !force) return;
-    const [sv, rt, is] = await Promise.all([
-      SB.get('surveys?select=*&order=at.desc&limit=10000'),
-      SB.get('survey_ratings?select=*&limit=200000'),
-      SB.get('issues?select=*&order=at.desc&limit=10000')
-    ]);
-    const byId = {};
-    this.surveys = sv.map(r=>{ const s=mapSurvey(r); byId[s.id]=s; return s; });
-    rt.forEach(r=>{ if(byId[r.survey_id]) byId[r.survey_id].ratings[r.item] = r.score; });
-    this.issues = is.map(mapIssue);
-    this.loaded = true;
-  },
-
-  /* guest submit — survey row, its ratings, then any issues.
-     The id is minted here because an anonymous insert cannot read the row back. */
-  async submit(payload){
-    const sid = (crypto.randomUUID ? crypto.randomUUID()
-                 : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c=>{
-                     const r=Math.random()*16|0; return (c==='x'?r:(r&0x3|0x8)).toString(16); }));
-    const at = new Date().toISOString();
-    await SB.postQuiet('surveys', {
-      id:sid, room:payload.room, at, recommendation:payload.recommendation,
-      comments:payload.comments, avg:payload.avg, has_low:payload.lows.length>0
-    });
-    const ratingRows = Object.entries(payload.ratings)
-      .filter(([k,v])=>v!=='NA')
-      .map(([k,v])=>({survey_id:sid, item:k, department:ITEM[k].dept, score:v}));
-    if(ratingRows.length) await SB.postQuiet('survey_ratings', ratingRows);
-    if(payload.lows.length){
-      await SB.postQuiet('issues', payload.lows.map(l=>({
-        survey_id:sid, room:payload.room, department:ITEM[l.id].dept, category:ITEM[l.id].label,
-        tags:payload.details[l.id]||[], other_text:payload.otherText[l.id]||'',
-        rating:l.rating, at, status:'Open'
-      })));
-    }
-    return sid;
-  },
-
-  async updateIssue(id, patch){
+  updateIssue(id, patch){
     const i = this.issues.find(x=>x.id===id);
-    const body = {status:patch.status, assigned_to:patch.assignedTo, notes:patch.notes};
-    if((patch.status==='Resolved'||patch.status==='Closed') && !(i&&i.resolvedAt)) body.resolved_at = new Date().toISOString();
-    if(patch.status==='Open'||patch.status==='In Progress') body.resolved_at = null;
-    const [row] = await SB.patch('issues?id=eq.'+encodeURIComponent(id), body);
-    if(i) Object.assign(i, mapIssue(row));
+    if(!i) return;
+    Object.assign(i, patch);
+    if((patch.status==='Resolved'||patch.status==='Closed') && !i.resolvedAt) i.resolvedAt = new Date().toISOString();
+    if(patch.status==='Open'||patch.status==='In Progress') i.resolvedAt = null;
   },
-
   rooms(){
     return [...new Set(this.surveys.map(s=>s.room))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
   }
 };
+
+/* ---- demo seed --------------------------------------------------------- */
+let _seed = 20260907;
+function rnd(){ _seed = (_seed*1664525 + 1013904223) % 4294967296; return _seed/4294967296; }
+function pick(a){ return a[Math.floor(rnd()*a.length)]; }
+
+function seed(){
+  const staff = ['Shantanu','Karan','Mihika','Soham'];
+  const now = new Date();
+
+  for(let d=34; d>=0; d--){
+    const count = d===0 ? 4 : 1 + Math.floor(rnd()*4);
+    for(let n=0;n<count;n++){
+      const when = new Date(now);
+      when.setDate(now.getDate()-d);
+      when.setHours(9+Math.floor(rnd()*13), Math.floor(rnd()*60), 0, 0);
+      if(when > now) when.setTime(now.getTime() - 1000*60*Math.floor(rnd()*120));
+
+      const room = pick(ROOMS);
+      const ratings = {};
+      const roomBias = (room==='205'||room==='108'||room==='110') ? -0.17 : 0;
+
+      SECTIONS.forEach(sec=>{
+        if(sec.optional && rnd()<0.3) return;
+        activeItems(sec).forEach(it=>{
+          if(sec.id==='recreation' && rnd()<0.34){ ratings[it.id]='NA'; return; }
+          if((it.id==='room_service'||it.id==='breakfast') && rnd()<0.2){ ratings[it.id]='NA'; return; }
+          const r = rnd() + roomBias;
+          let v = r>0.35 ? 5 : r>0.13 ? 4 : r>0.05 ? 3 : r>0.02 ? 2 : 1;
+          if(sec.id==='overall') v = Math.max(2, Math.min(5, v+1));
+          ratings[it.id]=v;
+        });
+      });
+
+      const nums = Object.values(ratings).filter(v=>v!=='NA');
+      const avg = nums.reduce((a,b)=>a+b,0)/nums.length;
+      const lows = Object.entries(ratings).filter(([k,v])=>v!=='NA' && v<=3);
+      const rec = avg>4.3 ? 'Definitely Yes' : avg>3.9 ? 'Probably Yes' : avg>3.4 ? 'Not Sure' : pick(['Not Sure','Probably No','Definitely No']);
+
+      const survey = DB.addSurvey({
+        room, at:when.toISOString(), ratings, recommendation:rec,
+        comments: rnd()<0.2 ? pick(['Lovely stay, will be back.','Staff were very warm.','Sea view room was worth it.','Needs attention in a few places.','Breakfast spread could be better.']) : '',
+        avg:+avg.toFixed(2), hasLow: lows.length>0
+      });
+
+      lows.forEach(([k,v])=>{
+        const opts = DETAILS[k]||[];
+        const tags = opts.length ? [pick(opts.filter(o=>o!=='Other'))] : [];
+        if(opts.length>3 && rnd()<0.3){ const t2=pick(opts.filter(o=>o!=='Other'&&o!==tags[0])); if(t2) tags.push(t2); }
+        const ageH = (now-when)/36e5;
+        let status='Open';
+        if(ageH>26) status = rnd()<0.82 ? 'Closed' : 'Resolved';
+        else if(ageH>4) status = rnd()<0.5 ? 'Resolved' : (rnd()<0.6?'In Progress':'Open');
+        else status = rnd()<0.35 ? 'In Progress' : 'Open';
+        const resolved = (status==='Resolved'||status==='Closed')
+          ? new Date(when.getTime() + (0.5 + rnd()*5)*36e5).toISOString() : null;
+        DB.addIssue({
+          surveyId:survey.id, room, department:ITEM[k].dept, category:ITEM[k].label,
+          tags, otherText:'', rating:v, at:when.toISOString(),
+          status, assignedTo: status==='Open' ? '' : pick(staff),
+          notes: resolved ? pick(['Attended and rectified. Guest informed.','Team briefed, item replaced.','Checked with duty manager, closed.','Fixed the same day.']) : '',
+          resolvedAt:resolved
+        });
+      });
+    }
+  }
+}
+seed();
 
 /* =========================================================================
    3. HELPERS
@@ -568,20 +539,11 @@ function applyBrand(){
   document.documentElement.style.setProperty('--accent', DB.settings.brandColour);
 }
 function route(){
-  /* supports clean paths (/survey?room=101, /admin) and hash paths (#/survey?room=101) */
-  if(location.hash.length>1){
-    const [path, qs] = location.hash.slice(1).split('?');
-    return {path, q:new URLSearchParams(qs||'')};
-  }
-  let path = location.pathname.replace(/index\.html$/,'').replace(/\/+$/,'') || '/';
-  return {path, q:new URLSearchParams(location.search)};
-}
-function go(h){
-  if(location.hash.length>1 || location.protocol==='file:'){ location.hash = h; return; }
+  const h = location.hash.slice(1) || '/';
   const [path, qs] = h.split('?');
-  history.pushState({}, '', path + (qs?'?'+qs:''));
-  render();
+  return {path, q:new URLSearchParams(qs||'')};
 }
+function go(h){ location.hash = h; }
 
 /* =========================================================================
    4. GUEST SURVEY
@@ -605,7 +567,7 @@ function renderPicker(){
   </div></div>`;
   const sel=$('#rmsel'), btn=$('#rmgo');
   sel.addEventListener('change',()=>{ btn.disabled = !sel.value; });
-  btn.addEventListener('click',()=>{ if(sel.value) go('/?room='+encodeURIComponent(sel.value)); });
+  btn.addEventListener('click',()=>{ if(sel.value) go('/survey?room='+encodeURIComponent(sel.value)); });
 }
 
 function renderGuest(room){
@@ -692,7 +654,7 @@ function renderGuest(room){
   });
   const nx = $('#next');
   if(nx) nx.addEventListener('click', ()=>{
-    if(stage==='recommend'){ guest.comments = $('#comments').value; return submitSurvey(nx); }
+    if(stage==='recommend'){ guest.comments = $('#comments').value; return submitSurvey(); }
     guest.step++; window.scrollTo(0,0); renderGuest(room);
   });
   const bk = $('#back');
@@ -711,10 +673,10 @@ function lowCategories(){
     .map(([k,v])=>({id:k, rating:v}));
 }
 
-function submitSurvey(btn){
+function submitSurvey(){
   const lows = lowCategories();
   if(lows.length) renderDetails(lows);
-  else finishSurvey([], btn);
+  else finishSurvey([]);
 }
 
 function renderDetails(lows){
@@ -761,28 +723,27 @@ function renderDetails(lows){
   app.querySelectorAll('textarea[data-other]').forEach(t=>{
     t.addEventListener('input', ()=>{ guest.otherText[t.dataset.other]=t.value; });
   });
-  $('#fin').addEventListener('click', e=>{
+  $('#fin').addEventListener('click', ()=>{
     guest.comments = $('#comments2').value;
-    finishSurvey(lows, e.currentTarget);
+    finishSurvey(lows);
   });
 }
 
-async function finishSurvey(lows, btn){
+function finishSurvey(lows){
   const nums = Object.values(guest.answers).filter(v=>v!=='NA');
-  if(btn){ btn.disabled=true; btn.textContent='Sending\u2026'; }
-  try{
-    await DB.submit({
-      room:guest.room, ratings:guest.answers, recommendation:guest.recommendation,
-      comments:guest.comments, avg:+(avgOf(nums)).toFixed(2),
-      lows, details:guest.details, otherText:guest.otherText
+  const survey = DB.addSurvey({
+    room:guest.room, at:new Date().toISOString(), ratings:{...guest.answers},
+    recommendation:guest.recommendation, comments:guest.comments,
+    avg:+(avgOf(nums)).toFixed(2), hasLow:lows.length>0
+  });
+  lows.forEach(l=>{
+    DB.addIssue({
+      surveyId:survey.id, room:guest.room, department:ITEM[l.id].dept, category:ITEM[l.id].label,
+      tags:guest.details[l.id]||[], otherText:guest.otherText[l.id]||'',
+      rating:l.rating, at:survey.at
     });
-    DB.loaded = false;
-    renderThanks(lows.length>0);
-  }catch(err){
-    if(btn){ btn.disabled=false; btn.textContent = lows.length?'Send feedback':'Submit'; }
-    toast('Could not send \u2014 check your connection and try again');
-    console.error(err);
-  }
+  });
+  renderThanks(lows.length>0);
 }
 
 function renderThanks(hadLow){
@@ -809,7 +770,7 @@ function renderThanks(hadLow){
       <div class="g-bar"><i style="width:100%"></i></div>
     </div>
     <div class="g-body">${body}
-      <div style="margin-top:40px;text-align:center"><button class="link-btn" id="again">Start another survey</button></div>
+      <div style="margin-top:40px;text-align:center"><button class="link-btn" id="again">\u2190 Back to demo menu</button></div>
     </div>
   </div>`;
   $('#again').addEventListener('click', ()=>{
@@ -888,30 +849,20 @@ function stats(sl){
   };
 }
 
-async function renderAdmin(){
+function renderAdmin(){
   applyBrand();
   if(!admin.auth) return renderLogin();
-  if(!DB.loaded){
-    app.innerHTML = `<div class="login"><div class="login-card">${imgFull()}<p>Loading\u2026</p></div></div>`;
-    try{ await DB.loadAll(); }
-    catch(err){
-      if(String(err.message).match(/JWT|401|token/i)){ SB.signOut(); admin.auth=false; return renderLogin(); }
-      app.innerHTML = `<div class="login"><div class="login-card">${imgFull()}<h1>Couldn't load data</h1><p>${esc(err.message)}</p></div></div>`;
-      return;
-    }
-  }
   const views = {dashboard:'Dashboard', quality:'Quality Control', rooms:'Rooms', reports:'Reports', settings:'Settings'};
   app.innerHTML = `<div class="a-shell">
     <div class="a-top"><div class="a-top-in">
       ${imgMark()}
       <div class="a-brand">${esc(DB.settings.resortName)}<small>Guest feedback console</small></div>
-      <nav class="a-nav">${Object.entries(views).map(([k,v])=>`<button data-v="${k}" class="${admin.view===k?'on':''}">${v}</button>`).join('')}<button data-v="_out">Sign out</button></nav>
+      <nav class="a-nav">${Object.entries(views).map(([k,v])=>`<button data-v="${k}" class="${admin.view===k?'on':''}">${v}</button>`).join('')}</nav>
     </div></div>
     <div class="a-main" id="amain"></div>
   </div>`;
   app.querySelector('.a-nav').addEventListener('click', e=>{
     const b=e.target.closest('button[data-v]'); if(!b) return;
-    if(b.dataset.v==='_out'){ SB.signOut(); admin.auth=false; DB.loaded=false; DB.surveys=[]; DB.issues=[]; return renderLogin(); }
     admin.view=b.dataset.v; admin.openIssue=null; admin.openRoom=null; renderAdmin();
   });
   const m = $('#amain');
@@ -928,24 +879,18 @@ function renderLogin(){
     ${imgFull()}
     <h1>Sign in</h1>
     <p>${esc(DB.settings.resortName)} \u00b7 feedback console</p>
-    <div class="field"><label>Email</label><input type="email" id="em" autocomplete="username"></div>
     <div class="field"><label>Password</label><input type="password" id="pw" autocomplete="current-password"></div>
     <button class="btn" id="go">Sign in</button>
     <div id="e"></div>
+    <div class="note" style="margin-top:20px">Demo password: <span class="mono">auspex</span></div>
   </div></div>`;
-  const attempt = async ()=>{
-    const btn=$('#go'); btn.disabled=true; btn.textContent='Signing in\u2026';
-    try{
-      await SB.signIn($('#em').value.trim(), $('#pw').value);
-      admin.auth=true; renderAdmin();
-    }catch(err){
-      btn.disabled=false; btn.textContent='Sign in';
-      $('#e').innerHTML = `<div class="err">${esc(err.message)}</div>`;
-    }
+  const attempt = ()=>{
+    if($('#pw').value === DB.settings.adminPassword){ admin.auth=true; renderAdmin(); }
+    else $('#e').innerHTML = `<div class="err">That password doesn't match. Try again.</div>`;
   };
   $('#go').addEventListener('click', attempt);
   $('#pw').addEventListener('keydown', e=>{ if(e.key==='Enter') attempt(); });
-  $('#em').focus();
+  $('#pw').focus();
 }
 
 function filterBar(){
@@ -1121,12 +1066,9 @@ function openIssue(id){
   const close=()=>bg.remove();
   bg.addEventListener('click', e=>{ if(e.target===bg) close(); });
   $('.close',bg).addEventListener('click', close);
-  $('#save',bg).addEventListener('click', async e=>{
-    const btn=e.currentTarget; btn.disabled=true; btn.textContent='Saving\u2026';
-    try{
-      await DB.updateIssue(id,{status:$('#st',bg).value, assignedTo:$('#asg',bg).value, notes:$('#nts',bg).value});
-      close(); renderAdmin(); toast('Issue updated');
-    }catch(err){ btn.disabled=false; btn.textContent='Save changes'; toast('Save failed \u2014 '+err.message); }
+  $('#save',bg).addEventListener('click', ()=>{
+    DB.updateIssue(id,{status:$('#st',bg).value, assignedTo:$('#asg',bg).value, notes:$('#nts',bg).value});
+    close(); renderAdmin(); toast('Issue updated');
   });
 }
 
@@ -1328,14 +1270,13 @@ function viewSettings(el){
       <div class="field"><label>Survey base URL</label><input type="url" id="s_u" value="${esc(s.baseUrl)}"></div>
       <button class="btn" id="ssave">Save settings</button>
     </div>`;
-    $('#ssave',out).addEventListener('click',async ()=>{
+    $('#ssave',out).addEventListener('click',()=>{
       s.resortName=$('#s_name',out).value; s.logo=$('#s_logo',out).value;
       s.googleReviewUrl=$('#s_g',out).value; s.brandColour=$('#s_c',out).value;
       s.surveyLength=$('#s_len',out).value;
       s.lowThreshold=+$('#s_t',out).value; s.resolutionTargetHrs=+$('#s_r',out).value;
       s.reportTime=$('#s_rt',out).value; s.baseUrl=$('#s_u',out).value;
-      try{ await DB.saveSettings(); renderAdmin(); toast('Settings saved'); }
-      catch(err){ toast('Save failed \u2014 '+err.message); }
+      renderAdmin(); toast('Settings saved');
     });
   } else {
     out.innerHTML = `<div class="panel">
@@ -1362,7 +1303,7 @@ function viewSettings(el){
         return;
       }
       rooms.forEach(r=>{
-        const url = DB.settings.baseUrl.replace(/\/+$/,'') + '/?room=' + encodeURIComponent(r);
+        const url = DB.settings.baseUrl + '#/survey?room=' + encodeURIComponent(r);
         const item=document.createElement('div'); item.className='qr-item';
         item.innerHTML=`<div class="box"></div><div class="rm">Room ${esc(r)}</div><button class="btn small ghost">Download</button>`;
         grid.appendChild(item);
@@ -1383,38 +1324,47 @@ function viewSettings(el){
 /* =========================================================================
    6. HOME + ROUTER
    ========================================================================= */
-function renderSetupNotice(){
-  app.innerHTML = `<div class="picker"><div class="picker-in">
+function renderHome(){
+  applyBrand();
+  app.innerHTML = `<div class="home"><div class="home-inner">
     ${imgFull()}
-    <span class="eyebrow">Setup required</span>
-    <h1>Not connected yet</h1>
-    <p>Open <span class="mono">index.html</span>, paste your Supabase project URL and anon key into the CONFIG block at the top, then redeploy.</p>
+    <span class="eyebrow">Working demo</span>
+    <h1>Guest feedback &amp; quality control</h1>
+    <p>Both halves of the system, running on sample data. Pick a door.</p>
+    <div class="home-grid">
+      <a class="home-card" href="#/survey?room=205">
+        <strong>Guest survey \u2014 Room 205</strong>
+        <span>What a guest sees after scanning the QR code. Rate something 3 or below to trigger the detailed feedback flow.</span>
+      </a>
+      <a class="home-card" href="#/survey?room=102">
+        <strong>Guest survey \u2014 Room 102</strong>
+        <span>Rate everything 4 or 5 to see the thank-you and Google review path instead.</span>
+      </a>
+      <a class="home-card" href="#/survey">
+        <strong>Room picker</strong>
+        <span>The fallback screen when someone opens the link without scanning a code \u2014 all 18 rooms in a dropdown.</span>
+      </a>
+      <a class="home-card" href="#/admin">
+        <strong>Management console</strong>
+        <span>Dashboard, quality control queue, room reports, exports, QR generator. Password: auspex</span>
+      </a>
+    </div>
+    <div class="note">Demo data lives in memory \u2014 ${DB.surveys.length} sample surveys and ${DB.issues.length} issues across the last 35 days. Anything you submit here is added to the dashboard live, but a page refresh resets everything.</div>
   </div></div>`;
 }
 
-async function render(){
-  if(!CONFIGURED) return renderSetupNotice();
+function render(){
   const {path, q} = route();
-  if(path==='/admin'){
-    if(!admin.auth && SB.restore()) admin.auth = true;
-    try{ await loadSettingsOnce(); }catch(e){ console.error(e); }
-    return renderAdmin();
+  if(path==='/survey'){
+    const room = q.get('room');
+    if(!room) return renderPicker();
+    if(guest.room !== room){ guest.step=-1; guest.answers={}; guest.details={}; guest.otherText={}; guest.recommendation=''; guest.comments=''; }
+    renderGuest(room);
   }
-  try{ await loadSettingsOnce(); }
-  catch(e){ console.error(e); }
-  const room = q.get('room');
-  if(!room) return renderPicker();
-  if(guest.room !== room){ guest.step=-1; guest.answers={}; guest.details={}; guest.otherText={}; guest.recommendation=''; guest.comments=''; }
-  renderGuest(room);
-}
-let _settingsLoaded = false;
-async function loadSettingsOnce(){
-  if(_settingsLoaded) return;
-  await DB.loadSettings();
-  _settingsLoaded = true;
+  else if(path==='/admin') renderAdmin();
+  else renderHome();
 }
 window.addEventListener('hashchange', render);
-window.addEventListener('popstate', render);
 render();
 </script>
 </body>
